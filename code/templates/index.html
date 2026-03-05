@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>機械手臂控制</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 12px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 24px;
+      color: #a0c4ff;
+      letter-spacing: 2px;
+    }
+
+    .axis-row {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      max-width: 480px;
+      margin-bottom: 14px;
+      gap: 10px;
+    }
+
+    .axis-label {
+      width: 48px;
+      font-size: 1.1rem;
+      font-weight: bold;
+      text-align: center;
+      color: #a0c4ff;
+      flex-shrink: 0;
+    }
+
+    .jog-btn {
+      flex: 1;
+      padding: 18px 0;
+      font-size: 1.2rem;
+      font-weight: bold;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.1s, transform 0.1s;
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+    }
+
+    .btn-rev {
+      background: #2d4a7a;
+      color: #7eb8ff;
+    }
+    .btn-fwd {
+      background: #2d4a7a;
+      color: #7eb8ff;
+    }
+
+    .jog-btn.active {
+      background: #1565c0;
+      color: #fff;
+      transform: scale(0.97);
+    }
+
+    .estop-row {
+      width: 100%;
+      max-width: 480px;
+      margin-top: 30px;
+    }
+
+    .estop-btn {
+      width: 100%;
+      padding: 22px 0;
+      font-size: 1.4rem;
+      font-weight: bold;
+      background: #c62828;
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      cursor: pointer;
+      letter-spacing: 2px;
+      transition: background 0.1s, transform 0.1s;
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+    }
+
+    .estop-btn:active {
+      background: #b71c1c;
+      transform: scale(0.97);
+    }
+
+    .status {
+      margin-top: 16px;
+      font-size: 0.85rem;
+      color: #888;
+      min-height: 1.2em;
+    }
+  </style>
+</head>
+<body>
+  <h1>⚙ 機械手臂控制</h1>
+
+  <div class="axis-row">
+    <div class="axis-label">A軸</div>
+    <button class="jog-btn btn-rev" data-axis="A" data-dir="reverse">◀ 反轉</button>
+    <button class="jog-btn btn-fwd" data-axis="A" data-dir="forward">正轉 ▶</button>
+  </div>
+
+  <div class="axis-row">
+    <div class="axis-label">B軸</div>
+    <button class="jog-btn btn-rev" data-axis="B" data-dir="reverse">◀ 反轉</button>
+    <button class="jog-btn btn-fwd" data-axis="B" data-dir="forward">正轉 ▶</button>
+  </div>
+
+  <div class="axis-row">
+    <div class="axis-label">C軸</div>
+    <button class="jog-btn btn-rev" data-axis="C" data-dir="reverse">◀ 反轉</button>
+    <button class="jog-btn btn-fwd" data-axis="C" data-dir="forward">正轉 ▶</button>
+  </div>
+
+  <div class="axis-row">
+    <div class="axis-label">D軸</div>
+    <button class="jog-btn btn-rev" data-axis="D" data-dir="reverse">◀ 反轉</button>
+    <button class="jog-btn btn-fwd" data-axis="D" data-dir="forward">正轉 ▶</button>
+  </div>
+
+  <div class="axis-row">
+    <div class="axis-label">E軸</div>
+    <button class="jog-btn btn-rev" data-axis="E" data-dir="reverse">◀ 反轉</button>
+    <button class="jog-btn btn-fwd" data-axis="E" data-dir="forward">正轉 ▶</button>
+  </div>
+
+  <div class="estop-row">
+    <button class="estop-btn" id="estop-btn">⚡ 緊急停止</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <script>
+    const status = document.getElementById('status');
+
+    function setStatus(msg, ok = true) {
+      status.textContent = msg;
+      status.style.color = ok ? '#4caf50' : '#ef5350';
+    }
+
+    async function postJSON(url, body) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        return await res.json();
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    }
+
+    // ── Jog 按鈕 ──────────────────────────────────────────────────────────────
+    const jogBtns = document.querySelectorAll('.jog-btn');
+
+    jogBtns.forEach(btn => {
+      const axis = btn.dataset.axis;
+      const dir  = btn.dataset.dir;
+
+      async function startJog(e) {
+        e.preventDefault();
+        btn.classList.add('active');
+        const res = await postJSON('/api/jog', { axis, direction: dir });
+        if (!res.ok) setStatus(`Jog 失敗: ${res.error}`, false);
+        else setStatus(`${axis}軸 ${dir === 'forward' ? '正轉' : '反轉'} 中…`);
+      }
+
+      async function stopJog(e) {
+        e.preventDefault();
+        btn.classList.remove('active');
+        const res = await postJSON('/api/stop', { axis });
+        if (!res.ok) setStatus(`Stop 失敗: ${res.error}`, false);
+        else setStatus(`${axis}軸 停止`);
+      }
+
+      btn.addEventListener('mousedown',  startJog);
+      btn.addEventListener('touchstart', startJog, { passive: false });
+
+      btn.addEventListener('mouseup',    stopJog);
+      btn.addEventListener('mouseleave', stopJog);
+      btn.addEventListener('touchend',   stopJog, { passive: false });
+      btn.addEventListener('touchcancel',stopJog, { passive: false });
+    });
+
+    // ── 緊急停止 ──────────────────────────────────────────────────────────────
+    document.getElementById('estop-btn').addEventListener('click', async () => {
+      jogBtns.forEach(b => b.classList.remove('active'));
+      const res = await postJSON('/api/estop', {});
+      if (!res.ok) setStatus(`急停失敗: ${res.error}`, false);
+      else setStatus('⚡ 全軸急停！', true);
+    });
+  </script>
+</body>
+</html>
