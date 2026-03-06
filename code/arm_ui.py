@@ -30,7 +30,16 @@ JOINTS = {
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    from flask import make_response, redirect
+    return redirect("/v2")
+
+@app.route("/v2")
+def index_v2():
+    from flask import make_response
+    resp = make_response(render_template("index.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/api/jog", methods=["POST"])
@@ -46,6 +55,7 @@ def api_jog():
 
     joint = JOINTS[axis]
     with _lock:
+        print(f"[JOG] {axis} {direction}", flush=True)
         if direction == "forward":
             joint.jog_forward()
         else:
@@ -63,7 +73,12 @@ def api_stop():
         return jsonify({"ok": False, "error": f"unknown axis: {axis}"}), 400
 
     with _lock:
-        JOINTS[axis].stop()
+        print(f"[STOP] {axis}", flush=True)
+        joint = JOINTS[axis]
+        if hasattr(joint, 'pause'):
+            joint.pause()   # B 軸用 pause（不清行程）
+        else:
+            joint.stop()
 
     return jsonify({"ok": True, "axis": axis})
 
@@ -73,6 +88,13 @@ def api_estop():
     with _lock:
         arm.estop_all()
     return jsonify({"ok": True, "action": "estop_all"})
+
+
+@app.route("/api/hall")
+def api_hall():
+    with _lock:
+        val = arm.e.read_hall()
+    return jsonify({"E": val})
 
 
 # ── 啟動 ──────────────────────────────────────────────────────────────────────

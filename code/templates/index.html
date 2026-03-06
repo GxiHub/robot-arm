@@ -16,8 +16,7 @@
       flex-direction: column;
       align-items: center;
       padding: 20px 12px;
-      user-select: none;
-      -webkit-user-select: none;
+      /* user-select: 只在按鈕上禁用 */
     }
 
     h1 {
@@ -57,6 +56,8 @@
       outline: none;
       -webkit-tap-highlight-color: transparent;
       touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     .btn-rev {
@@ -95,6 +96,8 @@
       outline: none;
       -webkit-tap-highlight-color: transparent;
       touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     .estop-btn:active {
@@ -108,6 +111,51 @@
       color: #888;
       min-height: 1.2em;
     }
+
+    .hall-panel {
+      width: 100%;
+      max-width: 480px;
+      margin-top: 20px;
+      background: #16213e;
+      border-radius: 12px;
+      padding: 14px 18px;
+      border: 1px solid #0f3460;
+    }
+    .hall-title {
+      font-size: 0.9rem;
+      color: #a0c4ff;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+    .hall-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .hall-label {
+      width: 48px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #a0c4ff;
+      text-align: center;
+    }
+    .hall-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #333;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    .hall-dot.triggered { background: #4caf50; box-shadow: 0 0 8px #4caf5088; }
+    .hall-dot.released  { background: #555; }
+    .hall-dot.error     { background: #c62828; }
+    .hall-text {
+      font-size: 0.85rem;
+      color: #888;
+    }
+    .hall-text.triggered { color: #4caf50; }
   </style>
 </head>
 <body>
@@ -149,6 +197,11 @@
 
   <div class="status" id="status"></div>
 
+  <div class="hall-panel">
+    <div class="hall-title">Hall 感測器</div>
+    <div id="hall-rows"></div>
+  </div>
+
   <script>
     const status = document.getElementById('status');
 
@@ -173,33 +226,46 @@
     // ── Jog 按鈕 ──────────────────────────────────────────────────────────────
     const jogBtns = document.querySelectorAll('.jog-btn');
 
+    let useTouch = false;
+    let hallPaused = false;
+
     jogBtns.forEach(btn => {
       const axis = btn.dataset.axis;
       const dir  = btn.dataset.dir;
+      let active = false;
 
-      async function startJog(e) {
-        e.preventDefault();
+      async function startJog() {
+        if (active) return;
+        active = true;
+        hallPaused = true;
         btn.classList.add('active');
         const res = await postJSON('/api/jog', { axis, direction: dir });
         if (!res.ok) setStatus(`Jog 失敗: ${res.error}`, false);
         else setStatus(`${axis}軸 ${dir === 'forward' ? '正轉' : '反轉'} 中…`);
       }
 
-      async function stopJog(e) {
-        e.preventDefault();
+      async function stopJog() {
+        if (!active) return;
+        active = false;
         btn.classList.remove('active');
+        hallPaused = false;
         const res = await postJSON('/api/stop', { axis });
         if (!res.ok) setStatus(`Stop 失敗: ${res.error}`, false);
         else setStatus(`${axis}軸 停止`);
       }
 
-      btn.addEventListener('mousedown',  startJog);
-      btn.addEventListener('touchstart', startJog, { passive: false });
+      // touch 優先，觸發後禁用 mouse 避免重複
+      btn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        useTouch = true;
+        startJog();
+      }, { passive: false });
+      btn.addEventListener('touchend',    (e) => { e.preventDefault(); stopJog(); }, { passive: false });
+      btn.addEventListener('touchcancel', (e) => { e.preventDefault(); stopJog(); }, { passive: false });
 
-      btn.addEventListener('mouseup',    stopJog);
-      btn.addEventListener('mouseleave', stopJog);
-      btn.addEventListener('touchend',   stopJog, { passive: false });
-      btn.addEventListener('touchcancel',stopJog, { passive: false });
+      btn.addEventListener('mousedown',  () => { if (!useTouch) startJog(); });
+      btn.addEventListener('mouseup',    () => { if (!useTouch) stopJog(); });
+      btn.addEventListener('mouseleave', () => { if (!useTouch) stopJog(); });
     });
 
     // ── 緊急停止 ──────────────────────────────────────────────────────────────
@@ -209,6 +275,37 @@
       if (!res.ok) setStatus(`急停失敗: ${res.error}`, false);
       else setStatus('⚡ 全軸急停！', true);
     });
+
+    // ── Hall 感測器輪詢 ──────────────────────────────────────────────────────
+    async function pollHall() {
+      try {
+        const res = await fetch('/api/hall');
+        const data = await res.json();
+        const container = document.getElementById('hall-rows');
+        let html = '';
+        for (const [axis, val] of Object.entries(data)) {
+          let cls, text;
+          if (val === true) {
+            cls = 'triggered'; text = '觸發';
+          } else if (val === false) {
+            cls = 'released'; text = '釋放';
+          } else {
+            cls = 'error'; text = '無回應';
+          }
+          html += `<div class="hall-row">
+            <div class="hall-label">${axis}軸</div>
+            <div class="hall-dot ${cls}"></div>
+            <div class="hall-text ${cls}">${text}</div>
+          </div>`;
+        }
+        container.innerHTML = html;
+      } catch (e) {}
+    }
+    async function hallLoop() {
+      if (!hallPaused) await pollHall();
+      setTimeout(hallLoop, 3000);
+    }
+    hallLoop();
   </script>
 </body>
 </html>

@@ -47,20 +47,17 @@ def read_reg(port, slave, reg) -> int | None:
 
 def scan_mode(port):
     """掃描模式：一次讀多個寄存器，找出哪個因磁鐵靠近而改變"""
-    # 候選寄存器：常見的 IO 狀態 / 限位狀態位置
+    # 候選寄存器
+    # ★ 0x0006 bit0 已確認為 Hall 感測器輸入（2026-03-06 測試確認）
     candidates = [
+        (0x0006, "IO輸入(已確認Hall)"),
         (0x0082, "告警碼"),
         (0x009B, "硬體限位設定"),
-        (0x00FC, "IO 狀態(猜)"),
-        (0x00FD, "IO 狀態2(猜)"),
-        (0x00FE, "IO 狀態3(猜)"),
-        (0x00FF, "IO 狀態4(猜)"),
-        (0x0100, "狀態1"),
-        (0x0101, "狀態2"),
-        (0x0102, "狀態3"),
-        (0x0060, "IO輸入(猜)"),
-        (0x0061, "IO輸入2(猜)"),
-        (0x0064, "輸入狀態(猜)"),
+        (0x0080, "狀態字0"),
+        (0x0081, "狀態字1"),
+        (0x0083, "狀態字3"),
+        (0x0084, "狀態字4"),
+        (0x0085, "狀態字5"),
     ]
 
     print("\n[掃描模式] 讀取 E 軸(Slave 5)所有候選寄存器")
@@ -115,7 +112,8 @@ def monitor_mode(port, reg: int, name: str):
                 ts = time.strftime("%H:%M:%S")
                 if val is not None:
                     bits = f"{val:016b}"
-                    status = "【觸發】" if val != 0 else "  釋放  "
+                    bit0 = val & 1
+                status = "【觸發】" if bit0 else "  釋放  "
                     print(f"  {ts}  0x{val:04X}  {bits}  {status}")
                 else:
                     print(f"  {ts}  讀取失敗")
@@ -149,7 +147,8 @@ def main():
     print("\n選擇模式：")
     print("  1. 掃描模式（找出哪個寄存器對應 Hall 輸入）")
     print("  2. 即時監控（手動輸入寄存器地址）")
-    choice = input("輸入 1 或 2：").strip()
+    print("  3. 快速監控 0x0006 bit0（已確認 Hall 輸入）")
+    choice = input("輸入 1, 2 或 3：").strip()
 
     if choice == "1":
         found = scan_mode(port)
@@ -168,6 +167,8 @@ def main():
             monitor_mode(port, reg, f"0x{reg:04X}")
         except ValueError:
             print("格式錯誤")
+    elif choice == "3":
+        monitor_mode(port, 0x0006, "IO輸入(Hall確認)")
 
     port.close()
 

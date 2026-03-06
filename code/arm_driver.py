@@ -66,6 +66,7 @@ _REG_SOFT_NEG  = 0x006E   # 軟負限位 (DWORD)
 _REG_SOFT_POS  = 0x0070   # 軟正限位 (DWORD)
 _REG_HW_LIMIT  = 0x009B   # 硬體限位配置
 _REG_ALARM     = 0x0082   # 告警碼
+_REG_IO_INPUT  = 0x0006   # IO 輸入狀態（bit0 = Hall 感測器）
 
 _CMD_STOP    = 0      # 減速停止
 _CMD_FORWARD = 1      # 正轉
@@ -133,6 +134,13 @@ class Joint:
     def read_alarm(self) -> int | None:
         """讀取告警碼（0=無告警）"""
         return self._read_reg(_REG_ALARM)
+
+    def read_hall(self) -> bool | None:
+        """讀取 Hall 感測器狀態（True=觸發, False=釋放, None=讀取失敗）"""
+        val = self._read_reg(_REG_IO_INPUT)
+        if val is None:
+            return None
+        return bool(val & 1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
