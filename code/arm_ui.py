@@ -360,6 +360,19 @@ def _cam_capture():
             pct = valid / depth_img.size * 100
             cv2.putText(color_img, f"Depth: {pct:.0f}%", (10, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # 偵測最近物體並標記
+            obj = _detect_nearest_object(depth_img)
+            if obj:
+                ox, oy, oz = obj
+                dist_cm = oz / 10.0
+                # 圓圈 + 十字
+                cv2.circle(color_img, (ox, oy), 20, (0, 0, 255), 2)
+                cv2.line(color_img, (ox - 15, oy), (ox + 15, oy), (0, 0, 255), 2)
+                cv2.line(color_img, (ox, oy - 15), (ox, oy + 15), (0, 0, 255), 2)
+                # 距離標籤
+                label = f"{dist_cm:.1f}cm"
+                cv2.putText(color_img, label, (ox + 25, oy + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         return color_img, depth_img
     except Exception as e:
         print(f"[CAM] 擷取失敗: {e}", flush=True)
@@ -556,244 +569,144 @@ def _approach_log(msg):
     print(f"[APPROACH] {msg}", flush=True)
 
 
-def _approach_detect(depth_img):
-    """偵測物體並回傳 (ox, oy, depth_mm) 或 None"""
-    obj = _detect_nearest_object(depth_img)
-    if obj is None:
-        return None
-    cx, cy, cz_mm = obj
-    h, w = depth_img.shape
-    ox = (cx - w / 2) / (w / 2)
-    oy = (cy - h / 2) / (h / 2)
-    return ox, oy, cz_mm, cx, cy
-
-
 def _approach_sense():
-    """從鏡頭取一幀深度圖，回傳 depth_img 或 None"""
+    """從鏡頭取一幀深度圖"""
     with _cam_lock:
         if not _cam_running:
             return None
         try:
             frames = _cam_pipeline.wait_for_frames(timeout_ms=3000)
             aligned = _cam_align.process(frames)
-            depth_frame = aligned.get_depth_frame()
-            if not depth_frame:
-                return None
-            return np.asanyarray(depth_frame.get_data())
+            df = aligned.get_depth_frame()
+            return np.asanyarray(df.get_data()) if df else None
         except Exception:
             return None
 
 
-def _approach_probe(axis, amount, state):
-    """試探法：移動一小步，觀察 ox/oy/depth 變化，回傳 (d_ox, d_oy, d_depth)"""
-    # 移動前偵測
-    depth_img = _approach_sense()
-    if depth_img is None:
+def _approach_detect():
+    """偵測最近物體，回傳 (cx, cy, depth_mm) 或 None"""
+    d = _approach_sense()
+    if d is None:
         return None
-    before = _approach_detect(depth_img)
-    if before is None:
-        return None
+    obj = _detect_nearest_object(d)
+    return obj  # (cx, cy, depth_mm) or None
 
-    # 執行移動
+
+def _b_jog(forward, duration=0.5):
+    """B 軸 jog 移動指定秒數（move_angle 位移太小，改用 jog+stop）"""
     with _lock:
-        if axis == "B":
-            arm.b.move_angle(abs(amount), forward=(amount > 0))
+        if forward:
+            arm.b.jog_forward()
         else:
-            JOINTS[axis].move_relative(amount)
-    time.sleep(1.0)
-
-    # 移動後偵測
-    depth_img = _approach_sense()
-    if depth_img is None:
-        return None
-    after = _approach_detect(depth_img)
-    if after is None:
-        return None
-
-    d_ox = after[0] - before[0]
-    d_oy = after[1] - before[1]
-    d_depth = after[2] - before[2]
-    return d_ox, d_oy, d_depth
+            arm.b.jog_reverse()
+    time.sleep(duration)
+    with _lock:
+        if hasattr(arm.b, 'pause'):
+            arm.b.pause()
+        else:
+            arm.b.stop()
+    time.sleep(0.3)  # 等穩定
 
 
 def _approach_worker():
-    """背景執行的靠近邏輯（試探式 — 禁用 A 軸，每次移動前即時試探）
+    """極簡靠近：B 軸 jog 降低 depth
 
-    策略：eye-in-hand 的 Jacobian 隨姿態劇烈變化，
-    不預存固定映射，而是每輪迭代都先試探再修正。
-    只用 B 軸（肩）做主要靠近，D/C 僅輔助。
+    用 jog+stop 控制 B 軸（move_angle 位移太小不實用）
+    每步 jog 0.5s → 偵測 depth 變化 → 自動決定方向
+    禁用 A 軸（避免繞線）
     """
     state = _approach_state
     state["step"] = 0
 
-    _approach_log("=== 安全靠近（即時試探）===")
-    _approach_log("禁用A軸，主用B軸")
+    _approach_log("=== 極簡靠近（B軸 jog）===")
 
-    # 設定慢速
     with _lock:
-        for j in [arm.c, arm.d, arm.e]:
-            j.set_speed(60)
         arm.b.set_speed(20)
     time.sleep(0.3)
 
-    # 暖機：先讀幾幀確保鏡頭穩定
+    # 暖機
     for _ in range(3):
-        d = _approach_sense()
-        if d is not None:
+        if _approach_sense() is not None:
             break
-        time.sleep(0.5)
-
-    # 初始偵測確認
-    depth_img = _approach_sense()
-    if depth_img is not None:
-        det0 = _approach_detect(depth_img)
-        if det0:
-            _approach_log(f"初始: ({det0[3]},{det0[4]}) d={det0[2]}mm ox={det0[0]:+.2f} oy={det0[1]:+.2f}")
-        else:
-            _approach_log("初始偵測無物體")
-    time.sleep(0.3)
-
-    lost_count = 0
-
-    for iteration in range(40):
-        if not state["running"]:
-            _approach_log("已手動停止")
-            break
-
-        state["step"] = iteration + 1
-
-        # ── 偵測當前狀態 ────
-        depth_img = _approach_sense()
-        if depth_img is None:
-            _approach_log("鏡頭錯誤，停止")
-            break
-
-        det = _approach_detect(depth_img)
-        if det is None:
-            lost_count += 1
-            _approach_log(f"步驟 {state['step']}: 丟失 ({lost_count}/3)")
-            if lost_count >= 3:
-                break
-            time.sleep(0.5)
-            continue
-        lost_count = 0
-
-        ox, oy, cz_mm, cx, cy = det
-        _approach_log(
-            f"步驟 {state['step']}: ({cx},{cy}) d={cz_mm}mm "
-            f"ox={ox:+.2f} oy={oy:+.2f}"
-        )
-
-        # ── 到達判定 ────
-        if abs(ox) < 0.20 and abs(oy) < 0.20 and cz_mm < 350:
-            _approach_log(f"✓ 到達! depth={cz_mm}mm ox={ox:+.2f} oy={oy:+.2f}")
-            state["target"] = {"pixel": [cx, cy], "depth_mm": cz_mm}
-            break
-
-        # ── 決定修正任務（步幅隨深度縮放）────
-        # 越近步幅越小，避免物體飛出畫面
-        scale = max(0.3, min(1.0, cz_mm / 600))  # 300mm→0.5, 600mm→1.0
-        b_step = max(1, int(2 * scale))           # 1~2°
-        d_step = max(10, int(25 * scale))          # 10~25 脈衝
-
-        tasks = []
-        # 水平偏差
-        if abs(ox) > 0.15:
-            tasks.append(("ox", "D", d_step))
-        # 深度
-        if cz_mm > 400:
-            tasks.append(("depth", "B", b_step))
-        # 垂直偏差（只在深度夠近時處理）
-        elif abs(oy) > 0.15:
-            tasks.append(("oy", "B", b_step))
-
-        if not tasks:
-            _approach_log(f"  微步 B+1° 靠近")
-            with _lock:
-                arm.b.move_angle(1, forward=True)
-            time.sleep(0.8)
-            continue
-
-        for action, axis, probe_amt in tasks:
-            if not state["running"]:
-                break
-
-            # ── 試探正方向 ────
-            _approach_log(f"  [{action}] 試探 {axis}+{probe_amt}")
-            with _lock:
-                if axis == "B":
-                    arm.b.move_angle(probe_amt, forward=True)
-                else:
-                    JOINTS[axis].move_relative(probe_amt)
-            time.sleep(0.8)
-
-            depth_img2 = _approach_sense()
-            det2 = _approach_detect(depth_img2) if depth_img2 is not None else None
-
-            if det2 is None:
-                _approach_log(f"  [{action}] 試探後丟失，回復")
-                with _lock:
-                    if axis == "B":
-                        arm.b.move_angle(probe_amt, forward=False)
-                    else:
-                        JOINTS[axis].move_relative(-probe_amt)
-                time.sleep(0.8)
-                continue
-
-            ox2, oy2, cz2, _, _ = det2
-
-            # 評估改善
-            if action == "depth":
-                improved = (cz2 < cz_mm - 5)
-                _approach_log(f"  [{action}] d: {cz_mm}→{cz2} ({cz2-cz_mm:+d}mm)")
-            elif action == "oy":
-                improved = (abs(oy2) < abs(oy) - 0.03)
-                _approach_log(f"  [{action}] oy: {oy:+.2f}→{oy2:+.2f}")
-            else:
-                improved = (abs(ox2) < abs(ox) - 0.03)
-                _approach_log(f"  [{action}] ox: {ox:+.2f}→{ox2:+.2f}")
-
-            if improved:
-                _approach_log(f"  [{action}] ✓ 正向有效，保持")
-                # 保持在新位置，不額外推進
-            else:
-                # 回復到原位，嘗試反方向
-                _approach_log(f"  [{action}] 回復，試反向")
-                with _lock:
-                    if axis == "B":
-                        arm.b.move_angle(probe_amt * 2, forward=False)
-                    else:
-                        JOINTS[axis].move_relative(-probe_amt * 2)
-                time.sleep(0.8)
-
-                # 反向偵測
-                depth_img3 = _approach_sense()
-                det3 = _approach_detect(depth_img3) if depth_img3 is not None else None
-                if det3:
-                    ox3, oy3, cz3, _, _ = det3
-                    if action == "depth":
-                        rev_ok = (cz3 < cz_mm - 5)
-                        _approach_log(f"  [{action}] 反向 d: {cz_mm}→{cz3}")
-                    elif action == "oy":
-                        rev_ok = (abs(oy3) < abs(oy) - 0.03)
-                        _approach_log(f"  [{action}] 反向 oy: {oy:+.2f}→{oy3:+.2f}")
-                    else:
-                        rev_ok = (abs(ox3) < abs(ox) - 0.03)
-                        _approach_log(f"  [{action}] 反向 ox: {ox:+.2f}→{ox3:+.2f}")
-
-                    if rev_ok:
-                        _approach_log(f"  [{action}] ✓ 反向有效")
-                    else:
-                        # 兩方向都無效，回復到原點
-                        _approach_log(f"  [{action}] 兩向皆無效，回原點")
-                        with _lock:
-                            if axis == "B":
-                                arm.b.move_angle(probe_amt, forward=True)
-                            else:
-                                JOINTS[axis].move_relative(probe_amt)
-                        time.sleep(0.5)
-
         time.sleep(0.3)
+
+    # 確認煞車已釋放
+    _approach_log("確認煞車...")
+    # (使用者需手動確認 CH0=ON)
+
+    # 初始偵測
+    obj = _approach_detect()
+    if obj is None:
+        _approach_log("找不到物體，停止")
+        state["running"] = False
+        return
+
+    prev_depth = obj[2]
+    _approach_log(f"初始: ({obj[0]},{obj[1]}) d={prev_depth}mm")
+
+    # B reverse = 降低手臂 = 靠近桌面物體（已實測確認）
+    b_forward = False
+    _approach_log("方向: B reverse（降低靠近）")
+
+    # ── 主循環 ────
+    stall = 0
+    jog_time = 0.5  # 每步 jog 時間
+
+    for i in range(50):
+        if not state["running"]:
+            _approach_log("手動停止")
+            break
+
+        state["step"] = i + 1
+        obj = _approach_detect()
+        if obj is None:
+            _approach_log(f"步驟{state['step']}: 丟失")
+            # 回退一步
+            _b_jog(forward=not b_forward, duration=jog_time)
+            break
+
+        cx, cy, cz = obj
+        _approach_log(f"步驟{state['step']}: ({cx},{cy}) d={cz}mm")
+
+        if cz < 300:
+            _approach_log(f"✓ 到達! d={cz}mm")
+            state["target"] = {"pixel": [cx, cy], "depth_mm": cz}
+            break
+
+        # jog 一步
+        _b_jog(forward=b_forward, duration=jog_time)
+
+        # 檢查
+        obj2 = _approach_detect()
+        if obj2 is None:
+            _approach_log("移動後丟失，回退")
+            _b_jog(forward=not b_forward, duration=jog_time)
+            break
+
+        delta = obj2[2] - prev_depth
+
+        if delta < -5:
+            _approach_log(f"  {prev_depth}→{obj2[2]} ({delta:+d}mm) ✓")
+            prev_depth = obj2[2]
+            stall = 0
+        elif delta > 30:
+            _approach_log(f"  {prev_depth}→{obj2[2]} ({delta:+d}mm) 反轉!")
+            b_forward = not b_forward
+            prev_depth = obj2[2]
+            stall = 0
+        else:
+            _approach_log(f"  {prev_depth}→{obj2[2]} ({delta:+d}mm) ~")
+            prev_depth = obj2[2]
+            stall += 1
+            if stall >= 4:
+                # 嘗試增加 jog 時間或換軸
+                if jog_time < 1.0:
+                    jog_time += 0.3
+                    _approach_log(f"  增加步幅: jog={jog_time:.1f}s")
+                    stall = 0
+                else:
+                    _approach_log("步幅已最大仍無進展，停止")
+                    break
 
     state["running"] = False
     _approach_log("=== 靠近結束 ===")
