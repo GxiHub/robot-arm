@@ -236,6 +236,7 @@ def api_relay():
     data = request.get_json(force=True) or {}
     channel = data.get("channel")
     state = data.get("state")  # true/false
+    slave = int(data.get("slave_id", RELAY_SLAVE))
     if channel is None or state is None:
         return jsonify({"ok": False, "error": "need channel and state"}), 400
     channel = int(channel)
@@ -245,16 +246,16 @@ def api_relay():
     val = 0xFF00 if state else 0x0000
     with _lock:
         arm.port.reset_input_buffer()
-        frame = struct.pack('>BBHH', RELAY_SLAVE, 0x05, channel, val)
+        frame = struct.pack('>BBHH', slave, 0x05, channel, val)
         frame += _crc16(frame)
         arm.port.write(frame)
         time.sleep(0.15)
         arm.port.read(64)
 
-    label = RELAY_CHANNELS.get(channel, f"CH{channel}")
+    label = RELAY_CHANNELS.get(channel, f"CH{channel}") if slave == RELAY_SLAVE else f"CH{channel}"
     action = "ON" if state else "OFF"
-    print(f"[RELAY] CH{channel}({label}) → {action}", flush=True)
-    return jsonify({"ok": True, "channel": channel, "state": state, "label": label})
+    print(f"[RELAY] slave={slave:#04x} CH{channel}({label}) → {action}", flush=True)
+    return jsonify({"ok": True, "slave_id": slave, "channel": channel, "state": state, "label": label})
 
 
 # ── 速度設定 ──────────────────────────────────────────────────────────────────
